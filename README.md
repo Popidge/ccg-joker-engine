@@ -46,6 +46,8 @@ Usage (common flags):
   - --out PATH (default: data/models/model.pt)
   - --device cpu|cuda (default: cpu)
   - --value-loss-weight FLOAT (default: 0.5)
+  - --amp / --no-amp (default: AMP on for CUDA, off for CPU)
+  - --amp-debug (optional; log GradScaler scale periodically when AMP enabled)
 - ccj-eval
   - --data PATH (default: data/raw/val.jsonl) or use --data-pv and --data-mixed
   - --data-pv PATH (optional; when dataset lacks off_pv)
@@ -69,6 +71,33 @@ Value loss
 Total loss
 - loss_total = loss_policy + λ * loss_value with default λ=0.5.
 - Override with --value-loss-weight FLOAT when running ccj-train.
+
+### AMP (Automatic Mixed Precision)
+
+- Training uses PyTorch AMP for faster throughput and lower memory on CUDA.
+- Default behavior:
+  - CUDA: AMP enabled by default. Disable with --no-amp (or --amp=false if supported).
+  - CPU: AMP is always disabled (forced). If requested, a warning is logged.
+- Implementation details:
+  - Forward/loss under torch.cuda.amp.autocast(enabled=amp)
+  - Backward/step via torch.cuda.amp.GradScaler when AMP is enabled
+  - Evaluation runs in FP32 for stable metrics
+- Startup log:
+  - [train] device=cuda amp=on
+  - [train] device=cpu amp=off (forced)
+
+Example (CUDA, AMP on):
+```bash
+uv run ccj-train \
+  --data data/raw/train_5k.jsonl \
+  --val-data data/raw/val_1k.jsonl \
+  --epochs 10 \
+  --batch-size 512 \
+  --lr 1e-3 \
+  --out data/models/model_amp.pt \
+  --device cuda \
+  --amp
+```
 
 ## Evaluation
 

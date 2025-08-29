@@ -35,6 +35,8 @@ class TrainArgs:
     seed: int = 42
     device: str = "cpu"
     value_loss_weight: float = 0.5  # lambda for value head contribution
+    amp: Optional[bool] = None      # None -> default by device; True/False to override
+    amp_debug: bool = False         # if True, log GradScaler scale periodically
 
 
 def set_seed(seed: int) -> None:
@@ -276,6 +278,22 @@ def train_loop(args: TrainArgs) -> None:
     set_seed(args.seed)
     device = torch.device(args.device)
 
+    # Resolve AMP setting based on device and flag
+    if device.type == "cpu":
+        effective_amp = False
+        console.print("[train] device=cpu amp=off (forced)")
+        if args.amp is True:
+            console.log("Warning: --amp requested on CPU; AMP is disabled.")
+    else:
+        # CUDA path
+        default_amp = True
+        effective_amp = default_amp if args.amp is None else bool(args.amp)
+        console.print(f"[train] device=cuda amp={'on' if effective_amp else 'off'}")
+
+    # Prefer deterministic settings for reproducibility (esp. when AMP is off)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     ds, train_loader, val_loader = make_loaders(args)
 
     # Model config sizing from dataset
@@ -286,6 +304,9 @@ def train_loop(args: TrainArgs) -> None:
 
     opt = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
+    # AMP GradScaler (enabled only when effective_amp is True)
+    scaler = torch.cuda.amp.GradScaler(enabled=effective_amp)
+
     best_val_acc = -1.0
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -295,19 +316,22 @@ def train_loop(args: TrainArgs) -> None:
         running = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0}
         samples = 0
 
-        for x, y_policy, y_value in pbar:
+        for step_idx, (x, y_policy, y_value) in enumerate(pbar, start=1):
             xb = {k: v.to(device) for k, v in x.items()}
             yv = y_value.to(device)
 
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
 
-            policy_logits, value_logits = model(xb)
-            pl = compute_policy_loss_from_batch(policy_logits, xb)
-            vl = value_loss(value_logits, yv)
-            loss = pl + args.value_loss_weight * vl
+            with torch.cuda.amp.autocast(enabled=effective_amp):
+                policy_logits, value_logits = model(xb)
+                pl = compute_policy_loss_from_batch(policy_logits, xb)
+                vl = value_loss(value_logits, yv)
+                loss = pl + args.value_loss_weight * vl
 
-            loss.backward()
-            opt.step()
+            # Backward + optimizer step (scaled when AMP is enabled)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
 
             bs = yv.size(0)
             samples += bs
@@ -315,13 +339,17 @@ def train_loop(args: TrainArgs) -> None:
             running["value_loss"] += float(vl.item()) * bs
             running["total_loss"] += float(loss.item()) * bs
 
+            if args.amp_debug and effective_amp and (step_idx % 200 == 0):
+                # Optional scaler growth factor debug log
+                console.log(f"[amp] scaler_scale={float(scaler.get_scale())}")
+
             pbar.set_postfix({
                 "pl": f"{running['policy_loss']/max(1,samples):.4f}",
                 "vl": f"{running['value_loss']/max(1,samples):.4f}",
                 "tl": f"{running['total_loss']/max(1,samples):.4f}",
             })
 
-        # Validation
+        # Validation (always FP32 for stable metrics)
         metrics = evaluate(model, val_loader, device, value_loss_weight=args.value_loss_weight)
         console.log(f"[bold]Val:[/bold] "
                     f"pl={metrics['policy_loss']:.4f} "
@@ -373,6 +401,17 @@ def main(
     seed: int = typer.Option(42, "--seed"),
     device: str = typer.Option("cpu", "--device"),
     value_loss_weight: float = typer.Option(0.5, "--value-loss-weight", help="Weight for value loss in total loss"),
+    amp: Optional[bool] = typer.Option(
+        None,
+        "--amp/--no-amp",
+        help="Enable AMP (mixed precision). Default: on for CUDA, off for CPU.",
+        show_default=False,
+    ),
+    amp_debug: bool = typer.Option(
+        False,
+        "--amp-debug",
+        help="If set, log GradScaler scale periodically when AMP is enabled.",
+    ),
 ) -> None:
     """
     Train policy/value net on Triplecargo JSONL data.
@@ -390,6 +429,8 @@ def main(
         seed=seed,
         device=device,
         value_loss_weight=value_loss_weight,
+        amp=amp,
+        amp_debug=amp_debug,
     )
     train_loop(args)
 
