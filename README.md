@@ -47,10 +47,14 @@ Usage (common flags):
   - --device cpu|cuda (default: cpu)
   - --value-loss-weight FLOAT (default: 0.5)
 - ccj-eval
-  - --data PATH (default: data/raw/val.jsonl)
+  - --data PATH (default: data/raw/val.jsonl) or use --data-pv and --data-mixed
+  - --data-pv PATH (optional; when dataset lacks off_pv)
+  - --data-mixed PATH (optional; requires --data-pv)
   - --model PATH (default: data/models/model.pt)
   - --batch-size INT (default: 128)
+  - --num-workers INT (default: 0)
   - --device cpu|cuda (default: cpu)
+  - --csv-out PATH (default: data/processed/eval_metrics.csv)
 
 ## Training
 
@@ -65,6 +69,38 @@ Value loss
 Total loss
 - loss_total = loss_policy + λ * loss_value with default λ=0.5.
 - Override with --value-loss-weight FLOAT when running ccj-train.
+
+## Evaluation
+
+Metrics
+- Policy:
+  - top‑k accuracy: top‑1, top‑2, top‑3 computed over onehot samples (with valid labels) and MCTS samples (using argmax of the target distribution).
+  - KL divergence: KL(p||q) averaged over MCTS samples only (p = target distribution, q = model softmax over masked logits).
+- Value:
+  - 3‑class accuracy (loss=0, draw=1, win=2).
+
+Slicing
+- If the dataset contains an off_pv boolean:
+  - The evaluator reports three slices: PV (off_pv=false), off‑PV (off_pv=true), and ALL.
+- If the dataset does not contain off_pv:
+  - Provide two paths and the evaluator will treat them as slices:
+    - --data-pv PATH  → PV slice
+    - --data-mixed PATH → off‑PV/mixed slice
+  - The tool also reports an aggregate over both.
+
+CSV output
+- Use --csv-out PATH to append metrics. Default: data/processed/eval_metrics.csv
+- Columns: timestamp, model, data_tag, n_samples, top1, top2, top3, kl, value_acc
+- When slices are present, one row is written per slice plus an aggregate row.
+
+Examples
+```bash
+# Single file with off_pv in records; write CSV rows
+uv run ccj-eval --data data/raw/val.jsonl --model data/models/model.pt --csv-out data/processed/eval_metrics.csv
+
+# Two-dataset slicing when off_pv is absent
+uv run ccj-eval --data-pv data/raw/val_pv.jsonl --data-mixed data/raw/val_mixed.jsonl --model data/models/model.pt --csv-out data/processed/eval_metrics.csv
+```
 
 ## Data schema (Triplecargo JSONL)
 
