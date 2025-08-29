@@ -45,11 +45,26 @@ Usage (common flags):
   - --lr FLOAT (default: 1e-3)
   - --out PATH (default: data/models/model.pt)
   - --device cpu|cuda (default: cpu)
+  - --value-loss-weight FLOAT (default: 0.5)
 - ccj-eval
   - --data PATH (default: data/raw/val.jsonl)
   - --model PATH (default: data/models/model.pt)
   - --batch-size INT (default: 128)
   - --device cpu|cuda (default: cpu)
+
+## Training
+
+Policy loss
+- Onehot samples: CrossEntropyLoss on masked policy logits [B,45] vs class indices [B].
+- MCTS samples: KL divergence KL(p||q) = ∑ p log(p/q) where p is the target distribution [B,45], q is model softmax(logits) [B,45]. Implemented with numerical stability (normalize p, clamp q with epsilon).
+- Mixed batches: compute CE on the onehot subset and KL on the MCTS subset, then combine by weighted average using the number of supervised samples (CE rows with label != -100, plus all KL rows). If the batch has only one type, compute only that loss.
+
+Value loss
+- Always CrossEntropyLoss on value logits [B,3] vs targets [B] (classes: loss=0, draw=1, win=2).
+
+Total loss
+- loss_total = loss_policy + λ * loss_value with default λ=0.5.
+- Override with --value-loss-weight FLOAT when running ccj-train.
 
 ## Data schema (Triplecargo JSONL)
 

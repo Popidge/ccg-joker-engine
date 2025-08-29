@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 
 import torch
 
@@ -58,8 +59,6 @@ def test_collate_fn_batching():
     assert y_value_b.shape == (2,)
     for v in y_value_b.tolist():
         assert int(v) in (0, 1, 2)
-import math
-
 def test_mixed_dataset_off_pv_and_policy_masks():
     ds = TriplecargoDataset("tests/fixtures/mixed.jsonl")
     assert len(ds) == 3
