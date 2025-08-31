@@ -1,7 +1,7 @@
 # CC Group Joker Engine (Python, uv-native)
 
-Lightweight ML/AI companion to the Rust solver (Triplecargo). Handles:
-- Loading JSONL training data exported by Triplecargo
+Lightweight ML/AI companion to the Rust solver ([Triplecargo](https://github.com/Popidge/triplecargo)). Handles:
+- Loading JSONL training data exported by [Triplecargo](https://github.com/Popidge/triplecargo)
 - Encoding board/hands/rules into tensors
 - Training a small policy/value neural net (PyTorch)
 - Evaluating accuracy and saving models
@@ -143,7 +143,7 @@ Overview
 - Training in RL mode reuses the same mixed KL/CE policy loss and value CE as supervised training.
 
 Environment
-- The Python wrapper (ccjoker.env.TripleTriadEnv) drives transitions using ['https://github.com/Popidge/triplecargo'](Triplecargo) via a lightweight eval‑state mode (stdin JSON → stdout JSON). For CI, a deterministic Python stub is available with --use-stub.
+- The Python wrapper (ccjoker.env.TripleTriadEnv) drives transitions using [Triplecargo](https://github.com/Popidge/triplecargo) via a lightweight eval‑state mode (stdin JSON → stdout JSON). For CI, a deterministic Python stub is available with --use-stub.
 
 New CLI commands
 - ccj-selfplay  → generate self‑play games into JSONL
@@ -200,11 +200,11 @@ uv run ccj-selfplay \
   --dirichlet-eps 0.25
 ```
 Notes
-- Triplecargo path: pass --triplecargo-cmd to ccj-selfplay/ccj-gate if needed
+- [Triplecargo](https://github.com/Popidge/triplecargo) path: pass --triplecargo-cmd to ccj-selfplay/ccj-gate if needed
 - Cards file: pass --cards to point both engines at the same data/cards.json.
 - CI: use --use-stub to avoid external engine dependency during tests.
 
-## Data schema (Triplecargo JSONL)
+## Data schema ([Triplecargo](https://github.com/Popidge/triplecargo) JSONL)
 
 Each line is a JSON object with the following fields:
 
