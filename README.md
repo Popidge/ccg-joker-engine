@@ -33,8 +33,11 @@ GPU users:
 
 The following entry points are provided:
 
-- ccj-train → ccjoker.train:main
-- ccj-eval  → ccjoker.eval:main
+- ccj-train     → ccjoker.train:main
+- ccj-eval      → ccjoker.eval:main
+- ccj-selfplay  → ccjoker.selfplay:main
+- ccj-train-rl  → ccjoker.train_rl:main
+- ccj-gate      → ccjoker.gate:main
 
 Usage (common flags):
 - ccj-train
@@ -130,6 +133,76 @@ uv run ccj-eval --data data/raw/val.jsonl --model data/models/model.pt --csv-out
 # Two-dataset slicing when off_pv is absent
 uv run ccj-eval --data-pv data/raw/val_pv.jsonl --data-mixed data/raw/val_mixed.jsonl --model data/models/model.pt --csv-out data/processed/eval_metrics.csv
 ```
+## Self‑play and RL (AlphaZero‑lite)
+
+Overview
+- Self‑play generates trajectories by playing games against itself using MCTS guided by the current network.
+- Each state writes a JSON record compatible with the training dataset:
+  - policy_target is an MCTS distribution map {"cardId-cell": prob} over legal moves.
+  - value_target ∈ {-1,0,1} is from the side‑to‑move perspective (win/draw/loss).
+- Training in RL mode reuses the same mixed KL/CE policy loss and value CE as supervised training.
+
+Environment
+- The Python wrapper (ccjoker.env.TripleTriadEnv) drives transitions using ['https://github.com/Popidge/triplecargo'](Triplecargo) via a lightweight eval‑state mode (stdin JSON → stdout JSON). For CI, a deterministic Python stub is available with --use-stub.
+
+New CLI commands
+- ccj-selfplay  → generate self‑play games into JSONL
+- ccj-train-rl  → train on self‑play JSONL
+- ccj-gate      → head‑to‑head matches for promotion gating
+
+Examples
+```bash
+# Generate 100 self‑play games with CUDA and append to a JSONL
+uv run ccj-selfplay \
+  --model data/models/mix_5k.pt \
+  --games 100 \
+  --out data/raw/selfplay_100.jsonl \
+  --device cuda
+
+# Train on the self‑play JSONL (RL mode)
+uv run ccj-train-rl \
+  --data data/raw/selfplay_100.jsonl \
+  --epochs 5 \
+  --batch-size 256 \
+  --lr 1e-3 \
+  --out data/models/mix_5k_rl.pt \
+  --device cuda \
+  --amp
+
+# Gate: play B vs A and report W/D/L and Elo delta; promote if score ≥ threshold
+uv run ccj-gate \
+  --a data/models/mix_5k.pt \
+  --b data/models/mix_5k_rl.pt \
+  --games 200 \
+  --device cuda
+```
+
+### Dirichlet root noise (exploration)
+
+To avoid overconfident root priors causing drawish play, self‑play injects Dirichlet noise at the root of each MCTS search:
+P' = (1 - eps) * P + eps * eta, where eta ~ Dirichlet(alpha) over legal moves only. The final distribution is masked and re‑normalized to sum to 1.0. This is applied only at the root before rollouts.
+
+Flags (ccj-selfplay):
+- --dirichlet-alpha FLOAT (default 0.3)
+- --dirichlet-eps FLOAT (default 0.25) — set 0.0 to disable (pure current behavior)
+
+Verbose mode logs:
+[selfplay] root priors mixed with Dirichlet(alpha=0.3, eps=0.25)
+
+Example:
+```bash
+uv run ccj-selfplay \
+  --model data/models/mix_5k.pt \
+  --games 1000 \
+  --rollouts 64 \
+  --temperature 1.0 \
+  --dirichlet-alpha 0.3 \
+  --dirichlet-eps 0.25
+```
+Notes
+- Triplecargo path: pass --triplecargo-cmd to ccj-selfplay/ccj-gate if needed
+- Cards file: pass --cards to point both engines at the same data/cards.json.
+- CI: use --use-stub to avoid external engine dependency during tests.
 
 ## Data schema (Triplecargo JSONL)
 
@@ -201,7 +274,13 @@ cc-joker-engine/
 │   ├── dataset.py
 │   ├── model.py
 │   ├── train.py
-│   └── eval.py
+│   ├── eval.py
+│   ├── env.py           # TripleTriadEnv wrapper (Triplecargo CLI or stub)
+│   ├── mcts.py          # AlphaZero-lite MCTS guided by Joker net
+│   ├── selfplay.py      # ccj-selfplay CLI
+│   ├── train_rl.py      # ccj-train-rl CLI
+│   ├── gate.py          # ccj-gate CLI
+│   └── checkpoint.py    # model checkpoint loader utility
 ├── data/
 │   ├── raw/
 │   ├── processed/
@@ -210,9 +289,14 @@ cc-joker-engine/
 │   └── explore_data.ipynb
 └── tests/
     ├── fixtures/sample.jsonl
+    ├── fixtures/mixed.jsonl
     ├── test_dataset.py
     ├── test_model.py
-    └── test_training.py
+    ├── test_training.py
+    ├── test_eval.py
+    ├── test_selfplay.py
+    ├── test_train_rl.py
+    └── test_gate.py
 ```
 
 ## Development workflow

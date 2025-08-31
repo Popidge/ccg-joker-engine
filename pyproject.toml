@@ -19,8 +19,11 @@ dependencies = [
 ]
 
 [project.scripts]
-ccj-train = "ccjoker.train:app"
-ccj-eval  = "ccjoker.eval:app"
+ccj-train     = "ccjoker.train:app"
+ccj-eval      = "ccjoker.eval:app"
+ccj-selfplay  = "ccjoker.selfplay:app"
+ccj-train-rl  = "ccjoker.train_rl:app"
+ccj-gate      = "ccjoker.gate:app"
 
 [build-system]
 requires = ["hatchling"]
