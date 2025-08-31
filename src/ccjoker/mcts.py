@@ -208,7 +208,7 @@ class MCTS:
         root_hash = root_state.get("state_hash")
         if not root_hash:
             # Fallback: compute a canonical hash if not present
-            from .env import _canonical_state_hash, TripleTriadEnv  # local import to avoid cycles
+            from .env import _canonical_state_hash  # local import to avoid cycles
             state_for_hash = dict(root_state)
             state_for_hash.pop("state_hash", None)
             root_hash = _canonical_state_hash(state_for_hash)

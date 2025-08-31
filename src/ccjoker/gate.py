@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 import typer
@@ -13,7 +12,6 @@ from .checkpoint import load_checkpoint, set_seed
 from .env import TripleTriadEnv
 from .mcts import MCTS
 from .model import PolicyValueNet, mask_policy_logits
-from . import utils as U
 
 app = typer.Typer(add_completion=False)
 console = Console()

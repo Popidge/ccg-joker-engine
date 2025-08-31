@@ -5,7 +5,7 @@ from typing import Optional
 
 import typer
 
-from .train import app as _train_app, TrainArgs, train_loop
+from .train import TrainArgs, train_loop
 
 app = typer.Typer(add_completion=False)
 

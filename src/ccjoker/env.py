@@ -6,7 +6,6 @@ import random
 import subprocess
 import sys
 import threading
-import time
 import queue
 from dataclasses import dataclass
 from pathlib import Path

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import math
 
 import torch
 from torch.utils.data import DataLoader
