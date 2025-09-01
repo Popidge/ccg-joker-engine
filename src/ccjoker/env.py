@@ -40,7 +40,11 @@ def _canonical_state_hash(state: StateDict) -> str:
 def _load_card_ids(cards_path: Optional[str]) -> List[int]:
     """
     Load the canonical card id set from a Triplecargo-style data/cards.json if present.
-    Expected minimal schema: {"cards":[{"id":int, ...}, ...]}
+
+    Supported formats:
+      - {"cards":[{"id":int, ...}, ...]}
+      - [ {"id":int, ...}, ... ]  (top-level list of card objects)
+
     Fallback to range(0,100) if file missing or malformed.
     """
     if cards_path is None:
@@ -51,12 +55,27 @@ def _load_card_ids(cards_path: Optional[str]) -> List[int]:
             return list(range(100))
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
-        cards = data.get("cards")
-        if isinstance(cards, list):
+
+        # Normalize to a list of card entries whether the JSON is an object with
+        # a "cards" key or a top-level list of card objects.
+        if isinstance(data, dict):
+            cards_list = data.get("cards")
+        elif isinstance(data, list):
+            cards_list = data
+        else:
+            cards_list = None
+
+        if isinstance(cards_list, list):
             ids: List[int] = []
-            for c in cards:
+            for c in cards_list:
+                # Support either dict entries with "id" or literal ints
                 if isinstance(c, dict) and "id" in c:
-                    ids.append(int(c["id"]))
+                    try:
+                        ids.append(int(c["id"]))
+                    except Exception:
+                        continue
+                elif isinstance(c, int):
+                    ids.append(int(c))
             if ids:
                 return sorted(set(ids))
         return list(range(100))

@@ -1204,9 +1204,9 @@
     "level": 10,
     "type": "Player",
     "top": 10,
-    "right": 10,
-    "bottom": 9,
-    "left": 6,
+    "right": 4,
+    "bottom": 6,
+    "left": 9,
     "element": null
   }
 ]
