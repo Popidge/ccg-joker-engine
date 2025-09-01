@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 import torch
 import typer
 from rich.console import Console
+from tqdm import tqdm
 
 from .checkpoint import load_checkpoint, set_seed
 from .env import TripleTriadEnv
@@ -163,6 +164,15 @@ def main(
     )
     console.log("MCTS setup")
 
+    # Progress bar and counters (only when not verbose)
+    a_wins = 0
+    b_wins = 0
+    draws = 0
+    played = 0
+    pbar = None
+    if not verbose:
+        pbar = tqdm(total=games, desc="Self-play", dynamic_ncols=True)
+
     # Run games
     game_id = 0
     total_t_mcts = 0.0
@@ -254,6 +264,20 @@ def main(
                 game_t_write += tw
                 total_t_write += tw
                 wrote = True
+
+                # Progress update per completed game (only when not verbose)
+                if not verbose:
+                    if winner == "A":
+                        a_wins += 1
+                    elif winner == "B":
+                        b_wins += 1
+                    else:
+                        draws += 1
+                    played += 1
+                    if pbar is not None:
+                        pbar.update(1)
+                        pbar.set_postfix({"played": played, "A": a_wins, "B": b_wins, "D": draws})
+
                 if verbose:
                     console.log(
                         f"[game {g}] end winner={winner} write={tw*1000:.2f}ms "
@@ -270,6 +294,15 @@ def main(
             tw = time.perf_counter() - t0w
             game_t_write += tw
             total_t_write += tw
+
+            # Progress update for forced write (treat as draw)
+            if not verbose:
+                draws += 1
+                played += 1
+                if pbar is not None:
+                    pbar.update(1)
+                    pbar.set_postfix({"played": played, "A": a_wins, "B": b_wins, "D": draws})
+
             if verbose:
                 console.log(
                     f"[game {g}] forced write write={tw*1000:.2f}ms "
@@ -277,6 +310,9 @@ def main(
                 )
 
         game_id += 1
+
+    if not verbose and pbar is not None:
+        pbar.close()
 
     if verbose:
         console.print(

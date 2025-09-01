@@ -1,93 +1,81 @@
 # CC Group Joker Engine (Python, uv-native)
 
-Lightweight ML/AI companion to the Rust solver ([Triplecargo](https://github.com/Popidge/triplecargo)). Handles:
-- Loading JSONL training data exported by [Triplecargo](https://github.com/Popidge/triplecargo)
+Lightweight ML/AI companion to the Rust solver (Triplecargo). It provides:
+- Loading JSONL training data exported by Triplecargo
 - Encoding board/hands/rules into tensors
 - Training a small policy/value neural net (PyTorch)
-- Evaluating accuracy and saving models
-- CLI entry points for training and evaluation
+- Evaluating accuracy and writing CSV metrics
+- Self-play generation, RL fine-tuning, and gating
 
-Project follows uv-first workflow with src/ layout and CLI scripts.
+Key sources:
+- Project config: [pyproject.toml](pyproject.toml)
+- Training: [src/ccjoker/train.py](src/ccjoker/train.py) ([python.main()](src/ccjoker/train.py:390))
+- Evaluation: [src/ccjoker/eval.py](src/ccjoker/eval.py) ([python.main()](src/ccjoker/eval.py:284))
+- Self-play: [src/ccjoker/selfplay.py](src/ccjoker/selfplay.py) ([python.main()](src/ccjoker/selfplay.py:86))
+- RL training: [src/ccjoker/train_rl.py](src/ccjoker/train_rl.py) ([python.main()](src/ccjoker/train_rl.py:13))
+- Gating: [src/ccjoker/gate.py](src/ccjoker/gate.py) ([python.main()](src/ccjoker/gate.py:57))
+
+## Prerequisites
+
+- Install uv: https://docs.astral.sh/uv/
+- Python 3.12 (workspace-pinned; uv will create .venv)
 
 ## Quickstart
 
-- Prereqs: Install uv (https://docs.astral.sh/uv/)
-
 ```bash
-# Sync local virtual env (.venv) and install deps
+# Create/sync the local virtual environment (.venv) and install deps
 uv sync
 
-# Train (CPU baseline)
+# Train (CPU example)
 uv run ccj-train --data data/raw/train.jsonl --epochs 10 --batch-size 64 --lr 1e-3 --out data/models/model.pt
 
-# Evaluate
-uv run ccj-eval --data data/raw/val.jsonl --model data/models/model.pt
+# Evaluate (writes CSV metrics)
+uv run ccj-eval --data data/raw/val.jsonl --model data/models/model.pt --csv-out data/processed/eval_metrics.csv
+
+# Generate self-play and train RL
+uv run ccj-selfplay --model data/models/model.pt --games 100 --out data/raw/selfplay_100.jsonl
+uv run ccj-train-rl --data data/raw/selfplay_100.jsonl --epochs 5 --batch-size 256 --out data/models/model_rl.pt
+
+# Gate: compare two models head-to-head
+uv run ccj-gate --a data/models/model.pt --b data/models/model_rl.pt --games 200
 ```
 
-GPU users:
-- This project pins CPU torch in pyproject. To use CUDA, you may install a CUDA wheel for torch compatible with your machine, e.g.:
-  - uv pip install --upgrade "torch==<version>+cu118" -f https://download.pytorch.org/whl/torch/
-- Keep uv.lock updated if you re-pin torch in this environment.
+### GPU/CPU notes
 
-## CLI
+- This repository pins a CUDA 12.1 PyTorch wheel in [pyproject.toml](pyproject.toml). On GPU machines, this installs torch==2.3.1+cu121 via the configured PyTorch index.
+- On CPU-only machines, you can switch to a CPU wheel by editing [pyproject.toml](pyproject.toml) to remove the custom source and changing the torch version accordingly, then:
+  - Recreate the lock/env: `uv lock && uv sync`
 
-The following entry points are provided:
+## CLI reference
 
-- ccj-train     → ccjoker.train:main
-- ccj-eval      → ccjoker.eval:main
-- ccj-selfplay  → ccjoker.selfplay:main
-- ccj-train-rl  → ccjoker.train_rl:main
-- ccj-gate      → ccjoker.gate:main
+The package exposes Typer apps as uv scripts (see [project.scripts](pyproject.toml)). Each command below lists flags, defaults, and behavior.
 
-Usage (common flags):
-- ccj-train
-  - --data PATH (default: data/raw/train.jsonl)
-  - --val-data PATH (optional; if not provided, --val-split is used)
-  - --epochs INT (default: 10)
-  - --batch-size INT (default: 64)
-  - --lr FLOAT (default: 1e-3)
-  - --out PATH (default: data/models/model.pt)
-  - --device cpu|cuda (default: cpu)
-  - --value-loss-weight FLOAT (default: 0.5)
-  - --amp / --no-amp (default: AMP on for CUDA, off for CPU)
-  - --amp-debug (optional; log GradScaler scale periodically when AMP enabled)
-- ccj-eval
-  - --data PATH (default: data/raw/val.jsonl) or use --data-pv and --data-mixed
-  - --data-pv PATH (optional; when dataset lacks off_pv)
-  - --data-mixed PATH (optional; requires --data-pv)
-  - --model PATH (default: data/models/model.pt)
-  - --batch-size INT (default: 128)
-  - --num-workers INT (default: 0)
-  - --device cpu|cuda (default: cpu)
-  - --csv-out PATH (default: data/processed/eval_metrics.csv)
+### ccj-train — Supervised training
+Source: [src/ccjoker/train.py](src/ccjoker/train.py) ([python.main()](src/ccjoker/train.py:390))
 
-## Training
+Trains the policy/value network on JSONL exported by Triplecargo.
 
-Policy loss
-- Onehot samples: CrossEntropyLoss on masked policy logits [B,45] vs class indices [B].
-- MCTS samples: KL divergence KL(p||q) = ∑ p log(p/q) where p is the target distribution [B,45], q is model softmax(logits) [B,45]. Implemented with numerical stability (normalize p, clamp q with epsilon).
-- Mixed batches: compute CE on the onehot subset and KL on the MCTS subset, then combine by weighted average using the number of supervised samples (CE rows with label != -100, plus all KL rows). If the batch has only one type, compute only that loss.
+Arguments:
+- --data PATH (Path, default: data/raw/train.jsonl)
+- --val-data PATH (Path, optional; if omitted, uses --val-split on --data)
+- --epochs INT (default: 10, min: 1)
+- --batch-size INT (default: 64, min: 1)
+- --lr FLOAT (default: 1e-3)
+- --weight-decay FLOAT (default: 0.0)
+- --out PATH (Path, default: data/models/model.pt)
+- --val-split FLOAT (default: 0.1, range: 0.01–0.5) used only when --val-data is not provided
+- --num-workers INT (default: 0)
+- --seed INT (default: 42)
+- --device cpu|cuda (default: cpu)
+- --value-loss-weight FLOAT (default: 0.5) weight λ in loss_total = loss_policy + λ * loss_value
+- --amp / --no-amp (default: on for CUDA, off for CPU) enable/disable mixed precision
+- --amp-debug (flag) log GradScaler scale periodically when AMP is enabled
 
-Value loss
-- Always CrossEntropyLoss on value logits [B,3] vs targets [B] (classes: loss=0, draw=1, win=2).
-
-Total loss
-- loss_total = loss_policy + λ * loss_value with default λ=0.5.
-- Override with --value-loss-weight FLOAT when running ccj-train.
-
-### AMP (Automatic Mixed Precision)
-
-- Training uses PyTorch AMP for faster throughput and lower memory on CUDA.
-- Default behavior:
-  - CUDA: AMP enabled by default. Disable with --no-amp (or --amp=false if supported).
-  - CPU: AMP is always disabled (forced). If requested, a warning is logged.
-- Implementation details:
-  - Forward/loss under torch.cuda.amp.autocast(enabled=amp)
-  - Backward/step via torch.cuda.amp.GradScaler when AMP is enabled
-  - Evaluation runs in FP32 for stable metrics
-- Startup log:
-  - [train] device=cuda amp=on
-  - [train] device=cpu amp=off (forced)
+Training details:
+- Policy: mixed loss supporting both onehot labels and MCTS distributions. See [python.compute_mixed_policy_loss()](src/ccjoker/train.py:66).
+- Value: CrossEntropy over 3 classes (loss=0, draw=1, win=2). See [python.value_loss()](src/ccjoker/train.py:161).
+- Total: loss_total = policy + λ * value (λ controlled by --value-loss-weight).
+- AMP: CUDA defaults to AMP on; CPU forces AMP off. Startup logs indicate the effective setting. See [python.train_loop()](src/ccjoker/train.py:277).
 
 Example (CUDA, AMP on):
 ```bash
@@ -102,92 +90,71 @@ uv run ccj-train \
   --amp
 ```
 
-## Evaluation
+### ccj-eval — Metrics and CSV export
+Source: [src/ccjoker/eval.py](src/ccjoker/eval.py) ([python.main()](src/ccjoker/eval.py:284))
 
-Metrics
-- Policy:
-  - top‑k accuracy: top‑1, top‑2, top‑3 computed over onehot samples (with valid labels) and MCTS samples (using argmax of the target distribution).
-  - KL divergence: KL(p||q) averaged over MCTS samples only (p = target distribution, q = model softmax over masked logits).
-- Value:
-  - 3‑class accuracy (loss=0, draw=1, win=2).
+Evaluates a trained checkpoint with per-slice metrics and appends rows to CSV.
 
-Slicing
-- If the dataset contains an off_pv boolean:
-  - The evaluator reports three slices: PV (off_pv=false), off‑PV (off_pv=true), and ALL.
-- If the dataset does not contain off_pv:
-  - Provide two paths and the evaluator will treat them as slices:
-    - --data-pv PATH  → PV slice
-    - --data-mixed PATH → off‑PV/mixed slice
-  - The tool also reports an aggregate over both.
+Arguments:
+- --data PATH (Path, default: data/raw/val.jsonl) single-dataset mode; if off_pv field exists, slices are inferred
+- --data-pv PATH (Path, optional) PV dataset when records lack off_pv
+- --data-mixed PATH (Path, optional) off‑PV/mixed dataset; requires --data-pv
+- --model PATH (Path, default: data/models/model.pt)
+- --batch-size INT (default: 128, min: 1)
+- --num-workers INT (default: 0)
+- --device cpu|cuda (default: cpu)
+- --csv-out PATH (Path, default: data/processed/eval_metrics.csv)
 
-CSV output
-- Use --csv-out PATH to append metrics. Default: data/processed/eval_metrics.csv
-- Columns: timestamp, model, data_tag, n_samples, top1, top2, top3, kl, value_acc
-- When slices are present, one row is written per slice plus an aggregate row.
+Metrics:
+- Policy: top‑1/top‑2/top‑3 accuracy on supervised rows; KL(p||q) on MCTS rows.
+- Value: 3‑class accuracy.
+- Slicing: 'pv', 'off_pv', and 'all' either inferred from off_pv or constructed from the two-dataset mode.
+- CSV columns: timestamp, model, data_tag, n_samples, top1, top2, top3, kl, value_acc.
 
-Examples
+Example:
 ```bash
-# Single file with off_pv in records; write CSV rows
+# Single file with off_pv; append slice + aggregate rows
 uv run ccj-eval --data data/raw/val.jsonl --model data/models/model.pt --csv-out data/processed/eval_metrics.csv
 
-# Two-dataset slicing when off_pv is absent
+# Two-dataset mode
 uv run ccj-eval --data-pv data/raw/val_pv.jsonl --data-mixed data/raw/val_mixed.jsonl --model data/models/model.pt --csv-out data/processed/eval_metrics.csv
 ```
-## Self‑play and RL (AlphaZero‑lite)
 
-Overview
-- Self‑play generates trajectories by playing games against itself using MCTS guided by the current network.
-- Each state writes a JSON record compatible with the training dataset:
-  - policy_target is an MCTS distribution map {"cardId-cell": prob} over legal moves.
-  - value_target ∈ {-1,0,1} is from the side‑to‑move perspective (win/draw/loss).
-- Training in RL mode reuses the same mixed KL/CE policy loss and value CE as supervised training.
+### ccj-selfplay — Generate trajectories (AlphaZero‑lite)
+Source: [src/ccjoker/selfplay.py](src/ccjoker/selfplay.py) ([python.main()](src/ccjoker/selfplay.py:86))
 
-Environment
-- The Python wrapper (ccjoker.env.TripleTriadEnv) drives transitions using [Triplecargo](https://github.com/Popidge/triplecargo) via a lightweight eval‑state mode (stdin JSON → stdout JSON). For CI, a deterministic Python stub is available with --use-stub.
+Generates self-play games using MCTS guided by the current network and appends JSONL trajectories.
 
-New CLI commands
-- ccj-selfplay  → generate self‑play games into JSONL
-- ccj-train-rl  → train on self‑play JSONL
-- ccj-gate      → head‑to‑head matches for promotion gating
+Arguments:
+- --model PATH (Path, required) checkpoint guiding self‑play (.pt from ccj‑train)
+- --games INT (default: 1)
+- --out PATH (Path, default: data/raw/selfplay.jsonl) output JSONL to append
+- --rollouts INT (default: 64, min: 0)
+- --temperature FLOAT (default: 1.0) early‑game temperature for turns < --sample-until
+- --dirichlet-alpha FLOAT (default: 0.3) root Dirichlet alpha over legal moves
+- --dirichlet-eps FLOAT (default: 0.25) root noise epsilon for turns ≥ --sample-until
+- --sample-until INT (default: 6, min: 0) sample from pi until this turn (exclusive), then switch to late settings
+- --early-dirichlet-eps FLOAT (default: 0.5) root noise epsilon for turns < --sample-until
+- --late-temperature FLOAT (default: 0.0) temperature for turns ≥ --sample-until (0.0 → argmax)
+- --seed INT (optional)
+- --device cpu|cuda (default: cpu)
+- --rules STR (default: "none") comma‑separated: elemental,same,plus,same_wall
+- --triplecargo-cmd PATH (optional) path to Triplecargo precompute.exe with --eval-state
+- --cards PATH (optional) cards.json path used by both engines
+- --use-stub / --no-use-stub (default: false) use deterministic Python stub for CI
+- --verbose (flag) detailed per‑game/per‑turn logging
+- --debug-ipc (flag) log raw JSON IPC to/from Triplecargo
 
-Examples
-```bash
-# Generate 100 self‑play games with CUDA and append to a JSONL
-uv run ccj-selfplay \
-  --model data/models/mix_5k.pt \
-  --games 100 \
-  --out data/raw/selfplay_100.jsonl \
-  --device cuda
+Exploration:
+- Root prior is mixed with Dirichlet noise: P' = (1 - eps) * P + eps * Dir(alpha), masked to legal moves and renormalized.
+- Two-phase schedule: early (turn < --sample-until) uses --temperature and --early-dirichlet-eps; late uses --late-temperature and --dirichlet-eps.
 
-# Train on the self‑play JSONL (RL mode)
-uv run ccj-train-rl \
-  --data data/raw/selfplay_100.jsonl \
-  --epochs 5 \
-  --batch-size 256 \
-  --lr 1e-3 \
-  --out data/models/mix_5k_rl.pt \
-  --device cuda \
-  --amp
-
-# Gate: play B vs A and report W/D/L and Elo delta; promote if score ≥ threshold
-uv run ccj-gate \
-  --a data/models/mix_5k.pt \
-  --b data/models/mix_5k_rl.pt \
-  --games 200 \
-  --device cuda
-```
-
-### Dirichlet root noise (exploration)
-
-To avoid overconfident root priors causing drawish play, self‑play injects Dirichlet noise at the root of each MCTS search:
-P' = (1 - eps) * P + eps * eta, where eta ~ Dirichlet(alpha) over legal moves only. The final distribution is masked and re‑normalized to sum to 1.0. This is applied only at the root before rollouts.
-
-Flags (ccj-selfplay):
-- --dirichlet-alpha FLOAT (default 0.3)
-- --dirichlet-eps FLOAT (default 0.25) — set 0.0 to disable (pure current behavior)
-
-Verbose mode logs:
-[selfplay] root priors mixed with Dirichlet(alpha=0.3, eps=0.25)
+Progress:
+- When --verbose is not passed, a progress bar updates once per completed game (after the JSONL line with state_idx=8 is written) with counts:
+  - played = total games completed
+  - A = A wins
+  - B = B wins
+  - D = draws
 
 Example:
 ```bash
@@ -197,69 +164,87 @@ uv run ccj-selfplay \
   --rollouts 64 \
   --temperature 1.0 \
   --dirichlet-alpha 0.3 \
+  --early-dirichlet-eps 0.5 \
   --dirichlet-eps 0.25
 ```
-Notes
-- [Triplecargo](https://github.com/Popidge/triplecargo) path: pass --triplecargo-cmd to ccj-selfplay/ccj-gate if needed
-- Cards file: pass --cards to point both engines at the same data/cards.json.
-- CI: use --use-stub to avoid external engine dependency during tests.
 
-## Data schema ([Triplecargo](https://github.com/Popidge/triplecargo) JSONL)
+### ccj-train-rl — Train from self-play
+Source: [src/ccjoker/train_rl.py](src/ccjoker/train_rl.py) ([python.main()](src/ccjoker/train_rl.py:13))
 
-Each line is a JSON object with the following fields:
+Uses the same training loop as ccj-train but with defaults suited for self-play data.
+
+Arguments:
+- --data PATH (Path, default: data/raw/selfplay.jsonl)
+- --val-data PATH (Path, optional)
+- --epochs INT (default: 5, min: 1)
+- --batch-size INT (default: 256, min: 1)
+- --lr FLOAT (default: 1e-3)
+- --weight-decay FLOAT (default: 0.0)
+- --out PATH (Path, default: data/models/model_rl.pt)
+- --val-split FLOAT (default: 0.1, range: 0.01–0.5) used only when --val-data is not provided
+- --num-workers INT (default: 0)
+- --seed INT (default: 42)
+- --device cpu|cuda (default: cpu)
+- --value-loss-weight FLOAT (default: 0.5)
+- --amp / --no-amp (default: on for CUDA, off for CPU)
+- --amp-debug (flag)
+
+### ccj-gate — Promotion gating
+Source: [src/ccjoker/gate.py](src/ccjoker/gate.py) ([python.main()](src/ccjoker/gate.py:57))
+
+Plays A vs B and prints a JSON summary with W/D/L, score of B, Elo delta, and a boolean 'promote'.
+
+Arguments:
+- --a PATH (Path, required) baseline/old model checkpoint
+- --b PATH (Path, required) candidate/new model checkpoint
+- --games INT (default: 20)
+- --device cpu|cuda (default: cpu)
+- --rollouts INT (default: 0, min: 0) 0 → greedy argmax; >0 → MCTS rollouts per move
+- --temperature FLOAT (default: 0.25) MCTS sampling temperature
+- --seed INT (optional; default: 123)
+- --rules STR (default: "none")
+- --triplecargo-cmd PATH (optional)
+- --cards PATH (optional)
+- --use-stub / --no-use-stub (default: false)
+- --threshold FLOAT (default: 0.55, range: 0.5–1.0) promotion threshold as score vs A
+
+Notes:
+- Greedy mode uses masked argmax over policy logits. See [python.select_move_greedy()](src/ccjoker/gate.py:32).
+- Elo mapping uses d = 400 * log10(s/(1-s)). See [python.elo_delta_from_score()](src/ccjoker/gate.py:45).
+
+## Data schema (Triplecargo JSONL)
+
+Each line is a JSON object with these fields:
 
 ```json
 {
   "game_id": 0,
   "state_idx": 0,
   "board": [
-    { "cell": 0, "card_id": 12, "owner": "A", "element": "F" },
-    ...
+    { "cell": 0, "card_id": 12, "owner": "A", "element": "F" }
   ],
-  "hands": {
-    "A": [10, 28, 47, 79, 91],
-    "B": [19, 39, 65, 80, 94]
-  },
+  "hands": { "A": [10, 28, 47, 79, 91], "B": [19, 39, 65, 80, 94] },
   "to_move": "A",
   "turn": 0,
-  "rules": {
-    "elemental": true,
-    "same": true,
-    "plus": false,
-    "same_wall": false
-  },
+  "rules": { "elemental": true, "same": true, "plus": false, "same_wall": false },
   "off_pv": false,
-  "policy_target": {
-    // onehot → {"card_id": 19, "cell": 7}
-    // mcts   → {"19-7": 0.5, "28-3": 0.5}
-  },
+  "policy_target": { "19-7": 0.5, "28-3": 0.5 },
   "value_target": 1,
   "value_mode": "winloss",
   "state_hash": "82d83106..."
 }
 ```
 
-Domains:
-- off_pv: boolean, optional (default False if absent)
-- value_mode=winloss → value_target ∈ {-1,0,+1}, from side-to-move perspective
-- value_mode=margin → value_target ∈ [-9,+9], A-perspective; mapped to 3-class by sign
-- policy_target (mixed formats supported per-sample):
-  - onehot → single object {card_id:int, cell:int}
+Domains and encoding summary:
+- off_pv: boolean, optional (default false if absent)
+- value_mode=winloss → value_target ∈ {-1,0,+1} from side-to-move perspective
+- value_mode=margin → value_target ∈ [-9,+9], A-perspective; mapped to 3‑class by sign
+- policy_target supports either:
+  - onehot → {card_id:int, cell:int}
   - mcts → dict of "cardId-cell": float with probs ≥0, sum≈1.0 (normalized on load)
 - element: "F","I","T","W","E","P","H","L" or null
-
-Encoding summary:
-- Board has 9 cells. For each cell we encode:
-  - owner onehot [A, B, empty] → 3 dims
-  - element onehot [F, I, T, W, E, P, H, L, none] → 9 dims
-  - card embedding (padding for empty) with padding_idx=0
-- Active hand uses the to_move side; 5 slots padded to fixed length
-- Rules encoded as [elemental, same, plus, same_wall] → 4 dims
-- Move space: 5 hand slots × 9 cells = 45 moves
-  - Index mapping: idx = slot*9 + cell
-- Targets:
-  - Policy: class (0..44) or distribution [45]
-  - Value: 3-class (loss=0, draw=1, win=2)
+- Move space: 5 hand slots × 9 cells = 45 moves; idx = slot*9 + cell
+- Targets: policy class (0..44) or distribution [45]; value 3‑class (loss=0, draw=1, win=2)
 
 ## Project layout
 
@@ -301,16 +286,16 @@ cc-joker-engine/
 
 ## Development workflow
 
-- Use uv for all tasks:
-  - uv sync
-  - uv run pytest
-  - uv run ruff check
+- Sync env: `uv sync`
+- Run tests: `uv run pytest`
+- Lint/format: `uv run ruff check` and `uv run ruff format`
 
-Optional formatting:
-- uv run ruff format
+Data handling:
+- Do not commit large datasets. Place large JSONL files under data/raw/.
+- Small sample/fixture JSONL lives under tests/fixtures/.
 
-## Notes
+## References
 
-- CPU torch is the default; see the GPU note above for CUDA wheels
-- Do not commit large datasets. Place large JSONL files under data/raw
-- Small sample/fixture JSONL lives under tests/fixtures
+- Triplecargo (Rust solver): https://github.com/Popidge/triplecargo
+- Typer docs: https://typer.tiangolo.com/
+- PyTorch AMP: https://pytorch.org/docs/stable/amp.html
