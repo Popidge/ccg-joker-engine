@@ -231,10 +231,19 @@ Arguments:
 - --cards PATH (optional)
 - --use-stub / --no-use-stub (default: false)
 - --threshold FLOAT (default: 0.55, range: 0.5–1.0) promotion threshold as score vs A
+- --workers INT (default: 1; cpu‑only) number of CPU worker processes to parallelize games
+- --torch-threads INT (default: 1; cpu‑only) torch.set_num_threads per worker to avoid oversubscription
 
 Notes:
 - Greedy mode uses masked argmax over policy logits. See [python.select_move_greedy()](src/ccjoker/gate.py:32).
 - Elo mapping uses d = 400 * log10(s/(1-s)). See [python.elo_delta_from_score()](src/ccjoker/gate.py:45).
+
+CPU parallelism (gate):
+- Set --workers > 1 with --device cpu to distribute games across worker processes. Each worker:
+  - Loads models A and B on CPU and creates its own Triplecargo --eval-state subprocess
+  - Plays its assigned share of games and reports results to the parent
+- A single progress bar aggregates W/D/L across workers (stdout remains pure JSON at the end).
+- Tune --workers and --torch-threads similar to ccj-selfplay recommendations.
 
 ## Data schema (Triplecargo JSONL)
 
