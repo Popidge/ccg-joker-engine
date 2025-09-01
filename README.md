@@ -144,6 +144,9 @@ Arguments:
 - --use-stub / --no-use-stub (default: false) use deterministic Python stub for CI
 - --verbose (flag) detailed per‑game/per‑turn logging
 - --debug-ipc (flag) log raw JSON IPC to/from Triplecargo
+- --workers INT (default: 1; cpu‑only) number of CPU worker processes; each worker spawns its own Triplecargo --eval-state
+- --torch-threads INT (default: 1; cpu‑only) torch.set_num_threads per worker to avoid oversubscription
+- --keep-shards / --no-keep-shards (default: false) keep per‑worker shard files instead of merging then deleting
 
 Exploration:
 - Root prior is mixed with Dirichlet noise: P' = (1 - eps) * P + eps * Dir(alpha), masked to legal moves and renormalized.
@@ -156,6 +159,14 @@ Progress:
   - B = B wins
   - D = draws
 
+CPU parallelism (cpu device only):
+- Set --workers > 1 to parallelize across CPU processes. Each worker:
+  - Loads the model on CPU and creates its own Triplecargo --eval-state subprocess
+  - Plays its assigned share of games and writes to a shard file: {--out}.w{worker_id}.jsonl
+- The parent process aggregates per‑game progress and merges shards into --out, deleting shards by default.
+  - Keep shards by passing --keep-shards.
+  - Control torch intra‑op threads per worker with --torch-threads (default 1) to avoid oversubscription.
+
 Example:
 ```bash
 uv run ccj-selfplay \
@@ -166,6 +177,19 @@ uv run ccj-selfplay \
   --dirichlet-alpha 0.3 \
   --early-dirichlet-eps 0.5 \
   --dirichlet-eps 0.25
+```
+
+CPU parallel example (12 workers on a 12‑core CPU):
+```bash
+uv run ccj-selfplay \
+  --model data/models/mix_5k.pt \
+  --games 2400 \
+  --rollouts 64 \
+  --device cpu \
+  --workers 12 \
+  --torch-threads 1 \
+  --out data/raw/selfplay_2400.jsonl
+# Shards will be merged into the --out file and then removed by default.
 ```
 
 ### ccj-train-rl — Train from self-play

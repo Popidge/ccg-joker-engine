@@ -9,6 +9,8 @@ import torch
 import typer
 from rich.console import Console
 from tqdm import tqdm
+import os
+from multiprocessing import Process, Queue
 
 from .checkpoint import load_checkpoint, set_seed
 from .env import TripleTriadEnv
@@ -84,6 +86,155 @@ def _write_jsonl(path: Path, records: List[Dict[str, object]]) -> None:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+def _worker_selfplay(
+    wid: int,
+    num_games: int,
+    model: str,
+    out: str,
+    rollouts: int,
+    temperature: float,
+    dirichlet_alpha: float,
+    dirichlet_eps: float,
+    sample_until: int,
+    early_dirichlet_eps: float,
+    late_temperature: float,
+    seed: Optional[int],
+    rules: str,
+    triplecargo_cmd: Optional[str],
+    cards: Optional[str],
+    use_stub: bool,
+    torch_threads: int,
+    debug_ipc: bool,
+    progress_queue: Optional[Queue],
+) -> None:
+    """
+    Worker process: runs num_games on CPU, writes to shard {out}.w{wid}.jsonl,
+    and reports per-game completion via progress_queue as ("done", 1, winner).
+    """
+    try:
+        # Limit intra-op and inter-op threads per worker to avoid oversubscription
+        try:
+            torch.set_num_threads(int(torch_threads))
+        except Exception:
+            pass
+        try:
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+        os.environ.setdefault("OMP_NUM_THREADS", str(int(torch_threads)))
+        os.environ.setdefault("MKL_NUM_THREADS", str(int(torch_threads)))
+
+        # Seed offset per worker
+        worker_seed = None if seed is None else int(seed) + 100000 * int(wid)
+        if worker_seed is not None:
+            set_seed(worker_seed)
+
+        # Load model on CPU in this worker
+        net, cfg, _meta = load_checkpoint(model, device="cpu", train_mode=False)
+
+        # Build env and MCTS
+        rules_dict = _parse_rules(rules)
+        env = TripleTriadEnv(
+            rules=rules_dict,
+            cards_path=cards if cards else "data/cards.json",
+            triplecargo_cmd=triplecargo_cmd
+            if triplecargo_cmd
+            else "C:/Users/popid/Dev/triplecargo/target/release/precompute.exe",
+            seed=worker_seed,
+            use_stub=use_stub,
+            max_card_id=(cfg.num_cards - 2) if use_stub else None,
+            debug_ipc=debug_ipc,
+        )
+        mcts = MCTS(
+            net=net,
+            device="cpu",
+            rollouts=rollouts,
+            c_puct=1.0,
+            temperature=temperature,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_eps=dirichlet_eps,
+            verbose=False,
+        )
+
+        out_shard = Path(f"{out}.w{wid}.jsonl")
+        game_id = 0
+
+        for g in range(num_games):
+            state = env.reset(seed=None if worker_seed is None else (worker_seed + g))
+            traj: List[Dict[str, object]] = []
+            wrote = False
+
+            for turn in range(9):
+                root = state
+
+                tau = float(temperature) if turn < int(sample_until) else float(late_temperature)
+                eps_override = float(early_dirichlet_eps) if turn < int(sample_until) else float(dirichlet_eps)
+
+                result = mcts.run(
+                    env, root, temperature_override=tau, dirichlet_eps_override=eps_override
+                )
+                pi: torch.Tensor = result["pi"]
+
+                # Record
+                pt_map = _policy_dist_to_map(pi, root)
+                record = {
+                    "game_id": game_id,
+                    "state_idx": turn,
+                    "board": root["board"],
+                    "hands": root["hands"],
+                    "to_move": root["to_move"],
+                    "turn": turn,
+                    "rules": root["rules"],
+                    "off_pv": False,
+                    "policy_target": pt_map,
+                    "value_target": 0,
+                    "value_mode": "winloss",
+                    "state_hash": root.get("state_hash"),
+                }
+                traj.append(record)
+
+                # Step
+                move_idx = int(result["selected"])
+                next_state, _reward, done, info = env.step(move_idx)
+                state = next_state
+
+                if done or (turn == 8):
+                    outcome = (info or {}).get("outcome") if isinstance(info, dict) else None
+                    winner = None
+                    if outcome and isinstance(outcome, dict):
+                        winner = outcome.get("winner")
+                    _backfill_values_trajectories(traj, winner)
+                    traj = traj[:9]
+                    _write_jsonl(out_shard, traj)
+                    if progress_queue is not None:
+                        try:
+                            progress_queue.put(("done", 1, winner), block=False)
+                        except Exception:
+                            pass
+                    wrote = True
+                    break
+
+            if not wrote:
+                _backfill_values_trajectories(traj, None)
+                traj = traj[:9]
+                _write_jsonl(out_shard, traj)
+                if progress_queue is not None:
+                    try:
+                        progress_queue.put(("done", 1, None), block=False)
+                    except Exception:
+                        pass
+
+            game_id += 1
+
+    except Exception as e:
+        # Best-effort error signal
+        if progress_queue is not None:
+            try:
+                progress_queue.put(("error", wid, str(e)), block=False)
+            except Exception:
+                pass
+
+
 @app.command()
 def main(
     model: Path = typer.Option(..., "--model", help="Checkpoint guiding self-play (.pt from ccj-train)"),
@@ -108,6 +259,9 @@ def main(
     use_stub: bool = typer.Option(False, "--use-stub/--no-use-stub", help="Use Python stub env for CI"),
     verbose: bool = typer.Option(False, "--verbose", help="Enable detailed per-game/per-turn logging"),
     debug_ipc: bool = typer.Option(False, "--debug-ipc", help="Log raw JSON IPC to/from Triplecargo (stderr)"),
+    workers: int = typer.Option(1, "--workers", min=1, help="CPU workers (processes). Only effective on --device cpu."),
+    torch_threads: int = typer.Option(1, "--torch-threads", min=1, help="Torch threads per CPU worker."),
+    keep_shards: bool = typer.Option(False, "--keep-shards/--no-keep-shards", help="Keep per-worker shard files instead of merging and deleting them."),
 ) -> None:
     """
     Generate self-play games with MCTS guided by a policy/value net. Append trajectories to JSONL.
@@ -121,6 +275,97 @@ def main(
     net, cfg, meta = load_checkpoint(model, device=device, train_mode=False)
     console.print(f"[selfplay] model={model} device={device} rollouts={rollouts} T={temperature}")
     console.print("[selfplay] model loaded")
+
+    # Multiprocessing branch for CPU parallelism
+    if device == "cpu" and int(workers) > 1:
+        if verbose:
+            console.log("[selfplay] verbose mode is silenced in multi-worker CPU mode", highlight=False)
+        # Compute per-worker game allocation
+        W = int(workers)
+        counts = [games // W + (1 if i < (games % W) else 0) for i in range(W)]
+        total_target = sum(counts)
+
+        # Aggregate progress across workers
+        q: Queue = Queue()
+        procs: List[Process] = []
+        a_wins = b_wins = draws = played = 0
+        pbar = tqdm(total=total_target, desc="Self-play (CPU x workers)", dynamic_ncols=True)
+
+        # Launch workers
+        for wid, n in enumerate(counts):
+            if n <= 0:
+                continue
+            p = Process(
+                target=_worker_selfplay,
+                args=(
+                    wid,
+                    int(n),
+                    str(model),
+                    str(out),
+                    int(rollouts),
+                    float(temperature),
+                    float(dirichlet_alpha),
+                    float(dirichlet_eps),
+                    int(sample_until),
+                    float(early_dirichlet_eps),
+                    float(late_temperature),
+                    seed,
+                    str(rules),
+                    str(triplecargo_cmd) if triplecargo_cmd else None,
+                    str(cards) if cards else None,
+                    bool(use_stub),
+                    int(torch_threads),
+                    bool(debug_ipc),
+                    q,
+                ),
+            )
+            p.daemon = True
+            p.start()
+            procs.append(p)
+
+        finished = 0
+        while finished < total_target:
+            msg = q.get()
+            if isinstance(msg, tuple) and msg:
+                if msg[0] == "done":
+                    _, inc, winner = msg
+                    finished += int(inc)
+                    if winner == "A":
+                        a_wins += 1
+                    elif winner == "B":
+                        b_wins += 1
+                    else:
+                        draws += 1
+                    played += 1
+                    pbar.update(1)
+                    pbar.set_postfix({"played": played, "A": a_wins, "B": b_wins, "D": draws})
+                elif msg[0] == "error":
+                    _wid, _err_wid, err_text = msg[0], msg[1], msg[2] if len(msg) > 2 else ""
+                    console.log(f"[selfplay][worker-error] wid={_err_wid} {err_text}")
+            # else ignore unknown messages
+
+        for p in procs:
+            p.join()
+
+        pbar.close()
+
+        # Merge shards into out and optionally delete them
+        out_path = Path(str(out))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "a", encoding="utf-8") as fout:
+            for wid, _n in enumerate(counts):
+                shard = Path(f"{str(out)}.w{wid}.jsonl")
+                if shard.exists():
+                    with open(shard, "r", encoding="utf-8") as fin:
+                        for line in fin:
+                            fout.write(line)
+                    if not keep_shards:
+                        try:
+                            shard.unlink()
+                        except Exception:
+                            pass
+
+        return
 
     # Build env
     rules_dict = _parse_rules(rules)
