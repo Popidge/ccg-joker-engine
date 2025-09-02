@@ -16,6 +16,7 @@ from .checkpoint import load_checkpoint, set_seed
 from .env import TripleTriadEnv
 from .mcts import MCTS
 from . import utils as U
+from .gate import _swap_sides
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -105,11 +106,15 @@ def _worker_selfplay(
     use_stub: bool,
     torch_threads: int,
     debug_ipc: bool,
+    start_from: int,
     progress_queue: Optional[Queue],
 ) -> None:
     """
     Worker process: runs num_games on CPU, writes to shard {out}.w{wid}.jsonl,
     and reports per-game completion via progress_queue as ("done", 1, winner).
+
+    start_from: global game index offset used to alternate the first player across workers
+    so that games distributed across workers preserve a global alternation pattern.
     """
     try:
         # Limit intra-op and inter-op threads per worker to avoid oversubscription
@@ -161,6 +166,12 @@ def _worker_selfplay(
 
         for g in range(num_games):
             state = env.reset(seed=None if worker_seed is None else (worker_seed + g))
+
+            # Alternate first player globally across workers using start_from offset
+            first = "A" if ((start_from + g) % 2 == 0) else "B"
+            if state.get("to_move") != first:
+                state = _swap_sides(state)
+
             traj: List[Dict[str, object]] = []
             wrote = False
 
@@ -292,6 +303,8 @@ def main(
         pbar = tqdm(total=total_target, desc="Self-play (CPU x workers)", dynamic_ncols=True)
 
         # Launch workers
+        # Launch workers with a global start index so alternation across workers is preserved
+        start_from = 0
         for wid, n in enumerate(counts):
             if n <= 0:
                 continue
@@ -316,12 +329,14 @@ def main(
                     bool(use_stub),
                     int(torch_threads),
                     bool(debug_ipc),
+                    int(start_from),
                     q,
                 ),
             )
             p.daemon = True
             p.start()
             procs.append(p)
+            start_from += int(n)
 
         finished = 0
         while finished < total_target:
@@ -427,6 +442,11 @@ def main(
         if verbose:
             console.log(f"[game {g}] start (seed={None if seed is None else (seed + g)})")
         state = env.reset(seed=None if seed is None else (seed + g))
+        # Alternate first player each game to avoid start-side bias
+        first = "A" if (g % 2 == 0) else "B"
+        if state.get("to_move") != first:
+            state = _swap_sides(state)
+
         traj: List[Dict[str, object]] = []
         wrote = False
         game_t_mcts = 0.0
