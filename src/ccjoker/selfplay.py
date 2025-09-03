@@ -106,6 +106,7 @@ def _worker_selfplay(
     use_stub: bool,
     torch_threads: int,
     debug_ipc: bool,
+    mirror: bool,
     start_from: int,
     progress_queue: Optional[Queue],
 ) -> None:
@@ -113,6 +114,8 @@ def _worker_selfplay(
     Worker process: runs num_games on CPU, writes to shard {out}.w{wid}.jsonl,
     and reports per-game completion via progress_queue as ("done", 1, winner).
 
+    mirror: if True, games are played in mirrored pairs sharing the same deal
+      (same hands/board) with A starting one game and B starting the other.
     start_from: global game index offset used to alternate the first player across workers
     so that games distributed across workers preserve a global alternation pattern.
     """
@@ -165,13 +168,20 @@ def _worker_selfplay(
         game_id = 0
 
         for g in range(num_games):
-            state = env.reset(seed=None if worker_seed is None else (worker_seed + g))
-
+            # When mirror is enabled, pair games reuse the same deal.
+            # Compute a base offset that is shared by the mirrored pair.
+            if mirror:
+                pair_offset = (start_from + g) // 2
+                reset_seed = None if worker_seed is None else (worker_seed + int(pair_offset))
+            else:
+                reset_seed = None if worker_seed is None else (worker_seed + int(g))
+            state = env.reset(seed=reset_seed)
+ 
             # Alternate first player globally across workers using start_from offset
             first = "A" if ((start_from + g) % 2 == 0) else "B"
             if state.get("to_move") != first:
                 state = _swap_sides(state)
-
+ 
             traj: List[Dict[str, object]] = []
             wrote = False
 
@@ -269,6 +279,7 @@ def main(
     ),
     use_stub: bool = typer.Option(False, "--use-stub/--no-use-stub", help="Use Python stub env for CI"),
     verbose: bool = typer.Option(False, "--verbose", help="Enable detailed per-game/per-turn logging"),
+    mirror: bool = typer.Option(True, "--mirror/--no-mirror", help="When on, mirror each dealt hand across a pair of games (A starts one, B starts the other)"),
     debug_ipc: bool = typer.Option(False, "--debug-ipc", help="Log raw JSON IPC to/from Triplecargo (stderr)"),
     workers: int = typer.Option(1, "--workers", min=1, help="CPU workers (processes). Only effective on --device cpu."),
     torch_threads: int = typer.Option(1, "--torch-threads", min=1, help="Torch threads per CPU worker."),
@@ -329,6 +340,7 @@ def main(
                     bool(use_stub),
                     int(torch_threads),
                     bool(debug_ipc),
+                    bool(mirror),
                     int(start_from),
                     q,
                 ),
@@ -441,7 +453,13 @@ def main(
     for g in range(games):
         if verbose:
             console.log(f"[game {g}] start (seed={None if seed is None else (seed + g)})")
-        state = env.reset(seed=None if seed is None else (seed + g))
+        # When mirror is enabled, pair games reuse the same deal (seed)
+        if mirror:
+            base_offset = g // 2
+            reset_seed = None if seed is None else (seed + int(base_offset))
+        else:
+            reset_seed = None if seed is None else (seed + g)
+        state = env.reset(seed=reset_seed)
         # Alternate first player each game to avoid start-side bias
         first = "A" if (g % 2 == 0) else "B"
         if state.get("to_move") != first:

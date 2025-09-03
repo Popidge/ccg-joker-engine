@@ -71,11 +71,14 @@ def _worker_gate(
     use_stub: bool,
     torch_threads: int,
     debug_ipc: bool,
+    mirror: bool,
     start_from: int,
     progress_queue: Optional[Queue],
 ) -> None:
     """
     Worker: plays num_games of A vs B on CPU and reports per-game results via progress_queue.
+    mirror: when True, games are paired so each dealt hand is played twice (mirrored),
+      with A starting one game and B starting the other.
     start_from is the global game index offset to preserve alternating first player.
     """
     try:
@@ -126,10 +129,16 @@ def _worker_gate(
 
         # Play assigned games
         for i in range(num_games):
+            # When mirror is enabled, pair games reuse the same deal.
+            if mirror:
+                pair_offset = (start_from + i) // 2
+                reset_seed = None if worker_seed is None else (worker_seed + int(pair_offset))
+            else:
+                reset_seed = None if worker_seed is None else (worker_seed + int(i))
             # Global alternation of first player
             first = "A" if ((start_from + i) % 2 == 0) else "B"
-            # Reset with deterministic per-game seed
-            state = env.reset(seed=None if worker_seed is None else (worker_seed + i))
+            # Reset with deterministic per-game seed (possibly shared for mirrored pair)
+            state = env.reset(seed=reset_seed)
             # Ensure desired starting side
             if state.get("to_move") != first:
                 state = _swap_sides(state)
@@ -186,6 +195,7 @@ def main(
     ),
     cards: Optional[Path] = typer.Option(None, "--cards", help="Path to cards.json for Triplecargo"),
     use_stub: bool = typer.Option(False, "--use-stub/--no-use-stub", help="Use Python stub env"),
+    mirror: bool = typer.Option(True, "--mirror/--no-mirror", help="When on, mirror each dealt hand across a pair of games (A starts one, B starts the other)"),
     threshold: float = typer.Option(0.55, "--threshold", min=0.5, max=1.0, help="Promotion threshold as score vs A"),
     workers: int = typer.Option(1, "--workers", min=1, help="CPU workers (processes). Only effective on --device cpu."),
     torch_threads: int = typer.Option(1, "--torch-threads", min=1, help="Torch threads per CPU worker."),
@@ -232,6 +242,7 @@ def main(
                     bool(use_stub),
                     int(torch_threads),
                     bool(debug_ipc),
+                    bool(mirror),
                     int(start_from),
                     q,
                 ),
@@ -323,10 +334,16 @@ def main(
     draws = 0
 
     for g in range(games):
+        # When mirror is enabled, reuse the same deal for paired games
+        if mirror:
+            base_offset = g // 2
+            reset_seed = None if seed is None else (seed + int(base_offset))
+        else:
+            reset_seed = None if seed is None else (seed + g)
         # Alternate first player: even -> A starts; odd -> B starts
         first = "A" if (g % 2 == 0) else "B"
-        # Reset with deterministic per-game seed
-        state = env.reset(seed=None if seed is None else (seed + g))
+        # Reset with deterministic per-game seed (possibly shared for mirrored pair)
+        state = env.reset(seed=reset_seed)
         # Ensure desired starting side
         if state.get("to_move") != first:
             state = _swap_sides(state)

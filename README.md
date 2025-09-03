@@ -196,12 +196,8 @@ First-player alternation (bias mitigation)
 - To reduce start-side bias during self-play (which can cause a strong model to overfit to "A starts"), ccj-selfplay now alternates the starting side deterministically:
   - Single-process mode: game g uses first = "A" when g is even, and "B" when g is odd.
   - Multi-worker mode: a global start offset is partitioned across worker shards so alternation is preserved across workers and merged output.
+- Mirror-by-default: to further reduce start-side bias, the default behavior is to mirror each dealt hand — each unique deal is played twice with the same hands/board, once with A starting and once with B starting. This is controlled by the CLI flag `--mirror/--no-mirror` on both ccj-selfplay and ccj-gate (default: `--mirror` enabled).
 - The implementation uses the same swap helper as gating to flip hands/owners/to_move when necessary. See implementation notes in: [`src/ccjoker/selfplay.py`](src/ccjoker/selfplay.py:445) and the swap helper in [`src/ccjoker/gate.py`](src/ccjoker/gate.py:391).
-- Validation:
-  - Single-process: run a small self-play job and inspect the first record of each game in the output JSONL to confirm the "to_move" value alternates between "A" and "B".
-  - Multi-worker: run with --workers > 1 and inspect the merged output for global alternation across games.
-- Optional stronger control:
-  - If you want each sampled initial state played both ways (mirror pairs: same hands/board but A-start and B-start), that can be done externally (orchestration script that re-runs or post-processes swapped states) or by adding an in-process `--mirror-initials` flag. The current change performs deterministic alternation only (no automatic mirrored-pair duplication).
 
 ### ccj-train-rl — Train from self-play
 Source: [src/ccjoker/train_rl.py](src/ccjoker/train_rl.py) ([python.main()](src/ccjoker/train_rl.py:13))
